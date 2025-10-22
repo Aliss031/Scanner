@@ -1,115 +1,80 @@
+from flask import Flask, render_template_string, request, jsonify, url_for
+import os, re
+from werkzeug.utils import secure_filename
+
+# Example: initialize your OCR + Firebase setup
+from your_ocr_module import EASYOCR_READER, preprocess_image, ocr_tesseract
+from your_firebase_module import check_pin_in_db, save_parcel_record
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = "uploads"
+
+# ------------------------------------------------------------
+# FRONTEND: main interface
+# ------------------------------------------------------------
 @app.route("/")
 def index():
-    return render_template_string("""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>📦 Parcel Scanner</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/sweetalert/dist/sweetalert.min.js"></script>
-  <style>
-    body {
-      background: linear-gradient(135deg, #0f172a, #1e293b);
-      color: #f1f5f9;
-      font-family: 'Inter', sans-serif;
-      text-align: center;
-    }
-    #log {
-      background: rgba(15, 23, 42, 0.85);
-      backdrop-filter: blur(8px);
-    }
-    video {
-      border-radius: 1rem;
-      box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
-    }
-    .glow {
-      animation: glowPulse 2s infinite alternate;
-    }
-    @keyframes glowPulse {
-      from { text-shadow: 0 0 10px #3b82f6; }
-      to { text-shadow: 0 0 25px #60a5fa; }
-    }
-  </style>
-</head>
-<body class="flex flex-col items-center min-h-screen py-10 px-4">
-
-  <h1 class="text-4xl font-extrabold mb-6 glow">📦 Smart Parcel Scanner</h1>
-  <p class="text-gray-300 mb-8">Scan parcel PINs automatically using OCR and verify in Firebase.</p>
-
-  <div class="flex flex-col items-center space-y-6">
-    <div class="relative border-4 border-blue-500 rounded-2xl overflow-hidden shadow-lg">
-      <video id="video" autoplay playsinline class="w-[90vw] max-w-lg"></video>
-      <div class="absolute top-2 left-2 bg-blue-600 text-white px-3 py-1 rounded-lg text-sm shadow">Camera Active</div>
-    </div>
-
-    <h3 id="result" class="text-xl font-semibold text-blue-300">🔍 Waiting for scan...</h3>
-
-    <div id="log" class="mt-6 w-full max-w-2xl rounded-xl p-4 text-left text-gray-200 overflow-y-auto border border-blue-800 shadow-inner h-52">
-      <div class="font-semibold text-blue-400 mb-2">📜 Scan Log:</div>
-    </div>
-  </div>
-
-  <audio id="beep" src="{{ url_for('static', filename='scanner.mp3') }}" preload="auto"></audio>
-
-  <footer class="mt-10 text-gray-500 text-sm">
-    Made with ❤️ using Flask + EasyOCR + Firebase
-  </footer>
-
-  <script>
-    const video = document.getElementById('video');
-    const result = document.getElementById('result');
-    const logDiv = document.getElementById('log');
-    const beep = document.getElementById('beep');
-
-    async function startBackCamera() {
-      try {
-        const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject = stream;
-      } catch (err) {
-        console.error("Error accessing back camera:", err);
-        swal("⚠ Camera Error", "Back camera not available. Please use a device with a rear camera.", "error");
-      }
-    }
-
-    function captureFrame() {
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
-      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-      return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg'));
-    }
-
-    async function sendFrame() {
-      try {
-        const blob = await captureFrame();
-        const formData = new FormData();
-        formData.append("frame", blob, "frame.jpg");
-
-        const res = await fetch("/scan", { method: "POST", body: formData });
-        const data = await res.json();
-
-        if (data.number && data.phone) {
-          result.innerHTML = `✅ <span class='text-green-400 font-bold'>PIN: ${data.number}</span><br>📱 Phone: ${data.phone}<br>📦 Parcel No: ${data.parcel_no}<br>🆔 ID: ${data.unique_id}`;
-          logDiv.innerHTML += `<div class='text-green-400'>✔ Found PIN ${data.number} → Phone: ${data.phone}, Parcel: ${data.parcel_no}, ID: ${data.unique_id}</div>`;
-          beep.play().catch(()=>{});
-        } else if (data.number && !data.phone) {
-          result.innerHTML = `⚠ <span class='text-yellow-400 font-bold'>PIN detected but not found in DB:</span> ${data.number}`;
-          logDiv.innerHTML += `<div class='text-yellow-400'>⚠ PIN ${data.number} not in database</div>`;
-        } else {
-          result.innerHTML = "❌ <span class='text-red-400 font-bold'>No valid PIN detected.</span>";
-        }
-        logDiv.scrollTop = logDiv.scrollHeight;
-      } catch (e) {
-        console.error(e);
-      }
-    }
-
-    startBackCamera();
-    setInterval(sendFrame, 5000);
-  </script>
-</body>
-</html>
+    return render_template_string(""" 
+    <!-- (Your Tailwind-styled HTML UI goes here — the one you shared earlier) -->
     """)
+
+
+# ------------------------------------------------------------
+# BACKEND: scanning endpoint
+# ------------------------------------------------------------
+@app.route("/scan", methods=["POST"])
+def scan_frame():
+    detected_number = None
+    phone_number = None
+    parcel_no = None
+    unique_id = None
+    all_text = []
+
+    if "frame" not in request.files:
+        return jsonify({"number": None, "phone": None, "all_text": []})
+
+    file = request.files["frame"]
+    filename = secure_filename(file.filename)
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(filepath)
+
+    processed = preprocess_image(filepath)
+    if processed is None:
+        return jsonify({"number": None, "phone": None, "all_text": []})
+
+    # 🔍 Run EasyOCR
+    results = EASYOCR_READER.readtext(processed)
+    all_text = [text for (_, text, _) in results]
+
+    # 🧾 Detect PIN (6-digit number)
+    easy_matches = [re.sub(r"\D", "", text) for text in all_text if re.fullmatch(r"\d{6}", re.sub(r"\D", "", text))]
+    if easy_matches:
+        detected_number = easy_matches[0]
+    else:
+        tess_matches = ocr_tesseract(processed)
+        if tess_matches:
+            detected_number = tess_matches[0]
+
+    # 🔗 Lookup in database
+    if detected_number:
+        phone_number = check_pin_in_db(detected_number)
+        if phone_number:
+            parcel_no, unique_id = save_parcel_record(phone_number)
+        else:
+            print(f"⚠ PIN {detected_number} not in database")
+    else:
+        print("❌ No 6-digit number found")
+
+    # 🧠 Return results to front-end
+    return jsonify({
+        "number": detected_number,
+        "phone": phone_number,
+        "parcel_no": parcel_no,
+        "unique_id": unique_id,
+        "all_text": all_text
+    })
+
+
+if __name__ == "__main__":
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    app.run(debug=True)
