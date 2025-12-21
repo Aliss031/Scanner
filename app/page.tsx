@@ -2,7 +2,16 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { Database, CheckCircle, XCircle, Loader, Trash2 } from "lucide-react";
-import { createWorker, PSM } from "tesseract.js";
+import { db } from "../lib/firebase";
+import {
+  collection,
+  doc,
+  setDoc,
+  getDocs,
+  query,
+  where,
+  deleteDoc,
+} from "firebase/firestore";
 
 type Parcel = {
   id: string;
@@ -10,6 +19,7 @@ type Parcel = {
   timestamp: number;
   status: string;
   date: string;
+  userName?: string;
 };
 
 type Notification = {
@@ -30,6 +40,7 @@ export default function ParcelScannerApp() {
   const workerRef = useRef<any>(null);
   const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // --- Initialization ---
   useEffect(() => {
     initOCR();
     startCamera();
@@ -45,7 +56,7 @@ export default function ParcelScannerApp() {
     if (ocrReady && !scanIntervalRef.current) {
       scanIntervalRef.current = setInterval(() => {
         if (!isProcessing) captureAndScan();
-      }, 3000); // ⏱ scan every 3 seconds
+      }, 3000); // scan every 3s
     }
     return () => {
       if (scanIntervalRef.current) {
@@ -55,8 +66,11 @@ export default function ParcelScannerApp() {
     };
   }, [ocrReady, isProcessing]);
 
+  // --- OCR Setup ---
   const initOCR = async () => {
+    if (typeof window === "undefined") return;
     try {
+      const { createWorker, PSM } = await import("tesseract.js");
       const worker = await createWorker();
       await worker.setParameters({
         tessedit_char_whitelist: "UD0123456789",
@@ -71,14 +85,12 @@ export default function ParcelScannerApp() {
     }
   };
 
+  // --- Camera ---
   const startCamera = async () => {
+    if (typeof window === "undefined" || !navigator?.mediaDevices) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "environment",
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
+        video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
       });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -94,6 +106,45 @@ export default function ParcelScannerApp() {
     streamRef.current = null;
   };
 
+  // --- Firestore Helpers ---
+  const checkUserByUniDropId = async (unidropId: string) => {
+    const q = query(collection(db, "users"), where("unidropId", "==", unidropId));
+    const snapshot = await getDocs(q);
+    if (!snapshot.empty) return snapshot.docs[0].data();
+    return null;
+  };
+
+  const saveParcelToFirestore = async (trackingNumber: string, userName?: string) => {
+    const parcelRef = doc(collection(db, "parcels"));
+    const parcelData: Parcel = {
+      id: parcelRef.id,
+      trackingNumber,
+      status: "Scanned",
+      timestamp: Date.now(),
+      date: new Date().toLocaleString(),
+      userName,
+    };
+    await setDoc(parcelRef, parcelData);
+    return parcelData;
+  };
+
+  const loadParcels = async () => {
+    try {
+      const snapshot = await getDocs(collection(db, "parcels"));
+      const list: Parcel[] = snapshot.docs.map((d) => d.data() as Parcel);
+      setParcels(list.sort((a, b) => b.timestamp - a.timestamp));
+    } catch {
+      console.warn("Failed to load parcels");
+    }
+  };
+
+  const deleteParcel = async (id: string) => {
+    await deleteDoc(doc(db, "parcels", id));
+    showNotification("Parcel deleted", "success");
+    loadParcels();
+  };
+
+  // --- OCR Scanning ---
   const captureAndScan = async () => {
     if (!videoRef.current || !canvasRef.current || !workerRef.current || isProcessing) return;
     setIsProcessing(true);
@@ -105,36 +156,43 @@ export default function ParcelScannerApp() {
       const w = video.videoWidth;
       const h = video.videoHeight;
 
-      // Focus on central 50% region (reduce background)
+      // Crop center region
       const roiX = w * 0.25;
       const roiY = h * 0.35;
       const roiW = w * 0.5;
       const roiH = h * 0.3;
-
       canvas.width = roiW;
       canvas.height = roiH;
       ctx.drawImage(video, roiX, roiY, roiW, roiH, 0, 0, roiW, roiH);
 
-      // Image preprocessing for better OCR
+      // Thresholding
       const imageData = ctx.getImageData(0, 0, roiW, roiH);
       const data = imageData.data;
       for (let i = 0; i < data.length; i += 4) {
         const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-        const val = avg > 150 ? 255 : 0; // thresholding
+        const val = avg > 150 ? 255 : 0;
         data[i] = data[i + 1] = data[i + 2] = val;
       }
       ctx.putImageData(imageData, 0, 0);
 
+      // OCR
       const { data: { text } } = await workerRef.current.recognize(canvas);
       const cleanText = text.replace(/[^A-Z0-9]/gi, "").toUpperCase();
-      const match = cleanText.match(/UD\d{5}/); // ✅ only UD + 5 digits
+      const match = cleanText.match(/UD\d{5}/);
 
       if (match) {
         const trackingNumber = match[0];
-        console.log("Detected UniDrop ID:", trackingNumber);
-        await saveParcel(trackingNumber);
-      } else {
-        console.log("No valid UniDrop ID found:", cleanText);
+        setScannedText(trackingNumber);
+
+        const user = await checkUserByUniDropId(trackingNumber);
+        if (user) {
+          await saveParcelToFirestore(trackingNumber, user.fullName);
+          showNotification(`✅ Scanned & matched: ${user.fullName}`, "success");
+        } else {
+          showNotification(`⚠️ UD ID not found in users`, "error");
+        }
+
+        loadParcels();
       }
     } catch (error) {
       console.error("OCR error:", error);
@@ -143,54 +201,16 @@ export default function ParcelScannerApp() {
     setIsProcessing(false);
   };
 
-  const loadParcels = () => {
-    try {
-      const stored = localStorage.getItem("parcels");
-      if (stored) {
-        const list: Parcel[] = JSON.parse(stored);
-        setParcels(list.sort((a, b) => b.timestamp - a.timestamp));
-      }
-    } catch {
-      console.warn("Failed to load parcels");
-    }
-  };
-
-  const saveParcel = async (trackingNumber: string) => {
-    if (parcels.some((p) => p.trackingNumber === trackingNumber)) return;
-
-    const parcel: Parcel = {
-      id: Date.now().toString(),
-      trackingNumber,
-      timestamp: Date.now(),
-      status: "Scanned",
-      date: new Date().toLocaleString(),
-    };
-
-    const updated = [parcel, ...parcels];
-    setParcels(updated);
-    localStorage.setItem("parcels", JSON.stringify(updated));
-
-    showNotification(`✅ Scanned: ${trackingNumber}`, "success");
-    setScannedText(trackingNumber);
-    setTimeout(() => setScannedText(""), 3000);
-  };
-
-  const deleteParcel = (id: string) => {
-    const updated = parcels.filter((p) => p.id !== id);
-    setParcels(updated);
-    localStorage.setItem("parcels", JSON.stringify(updated));
-    showNotification("Parcel deleted", "success");
-  };
-
   const showNotification = (message: string, type: "success" | "error") => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 3000);
   };
 
+  // --- Render ---
   return (
     <div className="min-h-screen bg-gray-100 text-black">
       <div className="max-w-4xl mx-auto p-4 space-y-6">
-        <h1 className="text-2xl font-bold">📦 UniDrop Scanner (High Accuracy)</h1>
+        <h1 className="text-2xl font-bold">📦 UniDrop Scanner (Firestore)</h1>
 
         {notification && (
           <div
@@ -203,7 +223,6 @@ export default function ParcelScannerApp() {
           </div>
         )}
 
-        {/* --- Camera with Scan Indicator --- */}
         <div className="relative bg-black rounded-lg overflow-hidden">
           <video ref={videoRef} autoPlay playsInline muted className="w-full aspect-video object-cover" />
           <canvas ref={canvasRef} className="hidden" />
@@ -218,25 +237,24 @@ export default function ParcelScannerApp() {
               {scannedText}
             </div>
           )}
-          {/* ROI guide box */}
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="border-4 border-green-400 rounded-xl w-1/2 h-1/3 opacity-70"></div>
           </div>
         </div>
 
-        {/* --- Stored IDs --- */}
         <div className="bg-white p-4 rounded-lg shadow max-h-80 overflow-y-auto">
           <h2 className="font-bold mb-2 flex items-center gap-2">
-            <Database /> Scanned UniDrop IDs ({parcels.length})
+            <Database /> Scanned Parcels ({parcels.length})
           </h2>
           {parcels.length === 0 ? (
-            <p className="text-gray-600">No UniDrop IDs scanned yet</p>
+            <p className="text-gray-600">No parcels scanned yet</p>
           ) : (
             parcels.map((p) => (
               <div key={p.id} className="flex justify-between items-center border-b py-2">
                 <div>
                   <p className="font-bold text-green-700">{p.trackingNumber}</p>
                   <p className="text-sm text-gray-600">{p.date}</p>
+                  {p.userName && <p className="text-sm text-blue-700">User: {p.userName}</p>}
                 </div>
                 <button onClick={() => deleteParcel(p.id)}>
                   <Trash2 className="text-red-600 hover:text-red-800" />
