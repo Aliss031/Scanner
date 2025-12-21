@@ -135,7 +135,7 @@ export default function ParcelScannerApp() {
     const parcelData: Parcel = {
       id: parcelRef.id,
       trackingNumber,
-      status: "Scanned",
+      status: "TO COLLECT",
       timestamp: Date.now(),
       date: new Date().toLocaleString(),
       userName,
