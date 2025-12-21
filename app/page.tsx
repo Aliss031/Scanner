@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { Database, CheckCircle, XCircle, Loader, Trash2 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { db } from "../lib/firebase";
 import {
   collection,
@@ -20,6 +21,8 @@ type Parcel = {
   status: string;
   date: string;
   userName?: string;
+  pin: string;
+  qrData: string;
 };
 
 type Notification = {
@@ -114,8 +117,21 @@ export default function ParcelScannerApp() {
     return null;
   };
 
+  // --- PIN & QR Helpers ---
+  const generatePin = () => {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+  };
+
+  const generateQrData = (parcelId: string, pin: string) => {
+    return `UNIDROP:${parcelId}:${pin}`;
+  };
+
   const saveParcelToFirestore = async (trackingNumber: string, userName?: string) => {
     const parcelRef = doc(collection(db, "parcels"));
+
+    const pin = generatePin();
+    const qrData = generateQrData(parcelRef.id, pin);
+
     const parcelData: Parcel = {
       id: parcelRef.id,
       trackingNumber,
@@ -123,7 +139,10 @@ export default function ParcelScannerApp() {
       timestamp: Date.now(),
       date: new Date().toLocaleString(),
       userName,
+      pin,
+      qrData,
     };
+
     await setDoc(parcelRef, parcelData);
     return parcelData;
   };
@@ -250,12 +269,17 @@ export default function ParcelScannerApp() {
             <p className="text-gray-600">No parcels scanned yet</p>
           ) : (
             parcels.map((p) => (
-              <div key={p.id} className="flex justify-between items-center border-b py-2">
-                <div>
-                  <p className="font-bold text-green-700">{p.trackingNumber}</p>
-                  <p className="text-sm text-gray-600">{p.date}</p>
-                  {p.userName && <p className="text-sm text-blue-700">User: {p.userName}</p>}
-                </div>
+              <div key={p.id} className="border-b py-3 space-y-2">
+                <p className="font-bold text-green-700">{p.trackingNumber}</p>
+                <p className="text-sm text-gray-600">{p.date}</p>
+                {p.userName && <p className="text-sm text-blue-700">User: {p.userName}</p>}
+
+                {/* Display PIN */}
+                <p className="text-sm font-mono">PIN: {p.pin}</p>
+
+                {/* Display QR code */}
+                <QRCodeSVG value={p.qrData} size={100} />
+
                 <button onClick={() => deleteParcel(p.id)}>
                   <Trash2 className="text-red-600 hover:text-red-800" />
                 </button>
