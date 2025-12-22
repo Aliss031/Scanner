@@ -1,128 +1,49 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { Html5Qrcode } from "html5-qrcode";
+import React, { useEffect, useRef, useState } from "react";
+import { Database, CheckCircle, XCircle, Loader, Trash2 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { db } from "../lib/firebase";
-import { collection, query, where, getDocs, doc, deleteDoc } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  setDoc,
+  getDocs,
+  query,
+  where,
+  deleteDoc,
+} from "firebase/firestore";
 
-export default function UniDropAuth() {
-  const [selectedMethod, setSelectedMethod] = useState<"qr" | "pin" | null>(null);
-  const [qrResult, setQrResult] = useState<string | null>(null);
-  const [pin, setPin] = useState("");
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verificationError, setVerificationError] = useState<string | null>(null);
-  const [verifiedData, setVerifiedData] = useState<any>(null);
-  const [parcelDocId, setParcelDocId] = useState<string | null>(null);
-  const qrCodeRef = useRef<HTMLDivElement | null>(null);
-  const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
+type Parcel = {
+  id: string;
+  trackingNumber: string;
+  timestamp: number;
+  status: string;
+  date: string;
+  userName?: string;
+  pin: string;
+  qrData: string;
+};
 
-  // Verify QR Code against database
-  const verifyQRCode = async (qrData: string) => {
-    setIsVerifying(true);
-    setVerificationError(null);
+type Notification = {
+  message: string;
+  type: "success" | "error";
+};
 
-    try {
-      // Parse QR data format: "UNIDROP:VfcXa2lmdyV9DycfySC0:596710"
-      const qrParts = qrData.split(":");
-      if (qrParts.length !== 3 || qrParts[0] !== "UNIDROP") {
-        throw new Error("Invalid QR code format");
-      }
+export default function ParcelScannerApp() {
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [scannedText, setScannedText] = useState("");
+  const [parcels, setParcels] = useState<Parcel[]>([]);
+  const [notification, setNotification] = useState<Notification | null>(null);
+  const [ocrReady, setOcrReady] = useState(false);
 
-      const parcelId = qrParts[1];
-      const qrPin = qrParts[2];
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const workerRef = useRef<any>(null);
+  const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-      // Query Firestore
-      const parcelsRef = collection(db, "parcels");
-      const q = query(parcelsRef, where("id", "==", parcelId));
-      const querySnapshot = await getDocs(q);
-
-      if (querySnapshot.empty) {
-        throw new Error("Parcel not found");
-      }
-
-      const parcelData = querySnapshot.docs[0].data();
-      const docId = querySnapshot.docs[0].id;
-
-      // Verify PIN matches
-      if (parcelData.pin !== qrPin) {
-        throw new Error("Invalid authentication");
-      }
-
-      // Check if already collected
-      if (parcelData.status === "COLLECTED") {
-        throw new Error("This parcel has already been collected");
-      }
-
-      // Check if parcel is scanned (ready to collect)
-      if (parcelData.status !== "TO COLLECT") {
-        throw new Error("Parcel not ready for collection");
-      }
-
-      setVerifiedData(parcelData);
-      setParcelDocId(docId);
-      
-      // Automatically delete parcel after verification
-      setTimeout(async () => {
-        const parcelRef = doc(db, "parcels", docId);
-        await deleteDoc(parcelRef);
-      }, 3000);
-      
-      return true;
-    } catch (error: any) {
-      setVerificationError(error.message);
-      return false;
-    } finally {
-      setIsVerifying(false);
-    }
-  };
-
-  // Verify PIN entry against database
-  const verifyPIN = async (enteredPin: string) => {
-    setIsVerifying(true);
-    setVerificationError(null);
-
-    try {
-      // Query Firestore for matching PIN
-      const parcelsRef = collection(db, "parcels");
-      const q = query(parcelsRef, where("pin", "==", enteredPin));
-      const querySnapshot = await getDocs(q);
-
-      if (querySnapshot.empty) {
-        throw new Error("Invalid PIN");
-      }
-
-      const parcelData = querySnapshot.docs[0].data();
-      const docId = querySnapshot.docs[0].id;
-
-      // Check if already collected
-      if (parcelData.status === "COLLECTED") {
-        throw new Error("This parcel has already been collected");
-      }
-
-      // Check if parcel is scanned (ready to collect)
-      if (parcelData.status !== "TO COLLECT") {
-        throw new Error("Parcel not ready for collection");
-      }
-
-      setVerifiedData(parcelData);
-      setParcelDocId(docId);
-      
-      // Automatically delete parcel after verification
-      setTimeout(async () => {
-        const parcelRef = doc(db, "parcels", docId);
-        await deleteDoc(parcelRef);
-      }, 3000);
-      
-      return true;
-    } catch (error: any) {
-      setVerificationError(error.message);
-      return false;
-    } finally {
-      setIsVerifying(false);
-    }
-  };
-
-  // --- QR Scanner ---
+  // --- Initialization ---
   useEffect(() => {
     initOCR();
     startCamera();
@@ -134,84 +55,37 @@ export default function UniDropAuth() {
     };
   }, []);
 
-    const html5QrCode = new Html5Qrcode("qr-scanner");
-    html5QrCodeRef.current = html5QrCode;
-
-    const startScanner = async () => {
-      try {
-        // ✅ FORCE FRONT CAMERA
-        await html5QrCode.start(
-          { facingMode: "user" },
-          {
-            fps: 10,
-            qrbox: (viewfinderWidth, viewfinderHeight) => {
-              const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-              const qrboxSize = Math.floor(minEdge * 0.8);
-              return { width: qrboxSize, height: qrboxSize };
-            },
-            aspectRatio: 1.0,
-          },
-          (decodedText) => {
-            setQrResult(decodedText);
-            html5QrCode.stop();
-            verifyQRCode(decodedText);
-          },
-          () => {}
-        );
-      } catch {
-        // 🔁 FALLBACK → BACK CAMERA
-        await html5QrCode.start(
-          { facingMode: "environment" },
-          { fps: 10 },
-          (decodedText) => {
-            setQrResult(decodedText);
-            html5QrCode.stop();
-            verifyQRCode(decodedText);
-          },
-          () => {}
-        );
+  useEffect(() => {
+    if (ocrReady && !scanIntervalRef.current) {
+      scanIntervalRef.current = setInterval(() => {
+        if (!isProcessing) captureAndScan();
+      }, 3000); // scan every 3s
+    }
+    return () => {
+      if (scanIntervalRef.current) {
+        clearInterval(scanIntervalRef.current);
+        scanIntervalRef.current = null;
       }
     };
   }, [ocrReady, isProcessing]);
 
-    startScanner();
-
-    return () => {
-      try {
-        html5QrCode.stop();
-        html5QrCode.clear();
-      } catch {}
-      html5QrCodeRef.current = null;
-    };
-  }, [selectedMethod]);
-
-  // Delete parcel from database after successful verification
-  const deleteParcelFromDB = async () => {
-    if (!parcelDocId) return;
-
+  // --- OCR Setup ---
+  const initOCR = async () => {
+    if (typeof window === "undefined") return;
     try {
-      const parcelRef = doc(db, "parcels", parcelDocId);
-      await deleteDoc(parcelRef);
-      
-      // Wait a moment before redirecting
-      setTimeout(() => {
-        handleCancel();
-      }, 3000);
-    } catch (error: any) {
-      console.error("Failed to delete parcel:", error);
+      const { createWorker, PSM } = await import("tesseract.js");
+      const worker = await createWorker();
+      await worker.setParameters({
+        tessedit_char_whitelist: "UD0123456789",
+        tessedit_pageseg_mode: PSM.SINGLE_LINE,
+      });
+      workerRef.current = worker;
+      setOcrReady(true);
+      showNotification("OCR ready for UniDrop scanning", "success");
+    } catch (error) {
+      console.error("OCR init error:", error);
+      showNotification("Failed to initialize OCR", "error");
     }
-  };
-
-  const handleCancel = () => {
-    try {
-      html5QrCodeRef.current?.stop();
-      html5QrCodeRef.current?.clear();
-    } catch {}
-    setSelectedMethod(null);
-    setQrResult(null);
-    setVerificationError(null);
-    setVerifiedData(null);
-    setParcelDocId(null);
   };
 
   // --- Camera ---
@@ -230,18 +104,17 @@ export default function UniDropAuth() {
     }
   };
 
-  const handleBackspace = () => setPin(pin.slice(0, -1));
-
-  const handleBack = () => {
-    setSelectedMethod(null);
-    setPin("");
-    setVerificationError(null);
-    setVerifiedData(null);
-    setParcelDocId(null);
+  const stopCamera = () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
   };
 
-  const handleConfirm = async () => {
-    await verifyPIN(pin);
+  // --- Firestore Helpers ---
+  const checkUserByUniDropId = async (unidropId: string) => {
+    const q = query(collection(db, "users"), where("unidropId", "==", unidropId));
+    const snapshot = await getDocs(q);
+    if (!snapshot.empty) return snapshot.docs[0].data();
+    return null;
   };
 
   // --- PIN & QR Helpers ---
@@ -253,63 +126,8 @@ export default function UniDropAuth() {
     return `UNIDROP:${parcelId}:${pin}`;
   };
 
-            {qrResult && (
-              <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-purple-50 to-purple-100 z-20">
-                <div className="text-center px-6 w-full">
-                  {isVerifying ? (
-                    <>
-                      <div className="w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-                      <p className="text-slate-900 font-bold text-xl">
-                        Verifying...
-                      </p>
-                    </>
-                  ) : verificationError ? (
-                    <>
-                      <div className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg shadow-red-500/30">
-                        <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </div>
-                      <p className="text-slate-900 font-bold text-xl mb-2">
-                        Verification Failed
-                      </p>
-                      <p className="text-red-600 text-sm mb-8">
-                        {verificationError}
-                      </p>
-                      <button
-                        onClick={handleCancel}
-                        className="w-full bg-gradient-to-r from-gray-500 to-gray-600 text-white py-4 rounded-2xl font-bold text-lg shadow-xl active:scale-98 transition-transform"
-                      >
-                        Try Again
-                      </button>
-                    </>
-                  ) : verifiedData ? (
-                    <>
-                      <div className="w-16 h-16 bg-green-500 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg shadow-green-500/30">
-                        <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                        </svg>
-                      </div>
-                      <p className="text-slate-900 font-bold text-2xl mb-2">
-                        Ready for Collection!
-                      </p>
-                      <div className="bg-white/70 rounded-xl p-6 mb-4 text-left">
-                        <p className="text-sm text-gray-600 mb-2">
-                          <span className="font-semibold text-slate-900">Tracking:</span> {verifiedData.trackingNumber}
-                        </p>
-                        <p className="text-sm text-gray-600">
-                          <span className="font-semibold text-slate-900">Recipient:</span> {verifiedData.userName}
-                        </p>
-                      </div>
-                      <p className="text-gray-500 text-sm">
-                        Your parcel is ready for collection
-                      </p>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            )}
-          </div>
+  const saveParcelToFirestore = async (trackingNumber: string, userName?: string) => {
+    const parcelRef = doc(collection(db, "parcels"));
 
     const pin = generatePin();
     const qrData = generateQrData(parcelRef.id, pin);
@@ -350,62 +168,77 @@ export default function UniDropAuth() {
     if (!videoRef.current || !canvasRef.current || !workerRef.current || isProcessing) return;
     setIsProcessing(true);
 
-          {verificationError && (
-            <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-xl">
-              <p className="text-red-600 text-sm text-center font-medium">
-                {verificationError}
-              </p>
-            </div>
-          )}
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext("2d")!;
+      const w = video.videoWidth;
+      const h = video.videoHeight;
 
-          {verifiedData && (
-            <div className="mb-4 p-6 bg-green-50 border border-green-200 rounded-xl">
-              <p className="text-green-700 text-base text-center font-bold mb-3">
-                ✓ Ready for Collection!
-              </p>
-              <div className="space-y-1">
-                <p className="text-sm text-gray-600 text-center">
-                  <span className="font-semibold">Tracking:</span> {verifiedData.trackingNumber}
-                </p>
-                <p className="text-sm text-gray-600 text-center">
-                  <span className="font-semibold">Recipient:</span> {verifiedData.userName}
-                </p>
-              </div>
-            </div>
-          )}
+      // Crop center region
+      const roiX = w * 0.25;
+      const roiY = h * 0.35;
+      const roiW = w * 0.5;
+      const roiH = h * 0.3;
+      canvas.width = roiW;
+      canvas.height = roiH;
+      ctx.drawImage(video, roiX, roiY, roiW, roiH, 0, 0, roiW, roiH);
 
-          <button
-            onClick={handleConfirm}
-            disabled={pin.length !== 4 || isVerifying}
-            className={`w-full py-4 rounded-2xl text-base font-semibold transition-all ${
-              pin.length === 4 && !isVerifying
-                ? "bg-gradient-to-r from-purple-600 to-purple-700 text-white shadow-lg shadow-purple-500/30 active:scale-98"
-                : "bg-slate-200 text-slate-400 cursor-not-allowed"
+      // Thresholding
+      const imageData = ctx.getImageData(0, 0, roiW, roiH);
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        const val = avg > 150 ? 255 : 0;
+        data[i] = data[i + 1] = data[i + 2] = val;
+      }
+      ctx.putImageData(imageData, 0, 0);
+
+      // OCR
+      const { data: { text } } = await workerRef.current.recognize(canvas);
+      const cleanText = text.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+      const match = cleanText.match(/UD\d{5}/);
+
+      if (match) {
+        const trackingNumber = match[0];
+        setScannedText(trackingNumber);
+
+        const user = await checkUserByUniDropId(trackingNumber);
+        if (user) {
+          await saveParcelToFirestore(trackingNumber, user.fullName);
+          showNotification(`✅ Scanned & matched: ${user.fullName}`, "success");
+        } else {
+          showNotification(`⚠️ UD ID not found in users`, "error");
+        }
+
+        loadParcels();
+      }
+    } catch (error) {
+      console.error("OCR error:", error);
+    }
+
+    setIsProcessing(false);
+  };
+
+  const showNotification = (message: string, type: "success" | "error") => {
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 3000);
+  };
+
+  // --- Render ---
+  return (
+    <div className="min-h-screen bg-gray-100 text-black">
+      <div className="max-w-4xl mx-auto p-4 space-y-6">
+        <h1 className="text-2xl font-bold">📦 UniDrop Scanner (Firestore)</h1>
+
+        {notification && (
+          <div
+            className={`p-3 rounded-lg flex items-center gap-2 ${
+              notification.type === "success" ? "bg-green-100" : "bg-red-100"
             }`}
           >
-            {isVerifying ? (
-              <span className="flex items-center justify-center gap-2">
-                <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                Verifying...
-              </span>
-            ) : (
-              "Confirm PIN"
-            )}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // --- Method Selection Screen ---
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white flex flex-col">
-      <div className="flex-1 flex flex-col justify-between px-6 py-12 safe-area">
-        <div className="text-center pt-12">
-          <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-purple-600 to-purple-700 rounded-3xl mb-6 shadow-lg">
-            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
+            {notification.type === "success" ? <CheckCircle /> : <XCircle />}
+            <span className="font-medium">{notification.message}</span>
           </div>
         )}
 
