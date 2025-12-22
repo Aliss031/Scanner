@@ -124,7 +124,15 @@ export default function UniDropAuth() {
 
   // --- QR Scanner ---
   useEffect(() => {
-    if (selectedMethod !== "qr" || !qrCodeRef.current) return;
+    initOCR();
+    startCamera();
+    loadParcels();
+    return () => {
+      stopCamera();
+      workerRef.current?.terminate();
+      if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
+    };
+  }, []);
 
     const html5QrCode = new Html5Qrcode("qr-scanner");
     html5QrCodeRef.current = html5QrCode;
@@ -164,6 +172,7 @@ export default function UniDropAuth() {
         );
       }
     };
+  }, [ocrReady, isProcessing]);
 
     startScanner();
 
@@ -205,8 +214,20 @@ export default function UniDropAuth() {
     setParcelDocId(null);
   };
 
-  const handleNumberClick = (num: string) => {
-    if (pin.length < 4) setPin(pin + num);
+  // --- Camera ---
+  const startCamera = async () => {
+    if (typeof window === "undefined" || !navigator?.mediaDevices) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        streamRef.current = stream;
+      }
+    } catch {
+      showNotification("Camera access denied", "error");
+    }
   };
 
   const handleBackspace = () => setPin(pin.slice(0, -1));
@@ -223,32 +244,14 @@ export default function UniDropAuth() {
     await verifyPIN(pin);
   };
 
-  // --- QR Scanner Screen ---
-  if (selectedMethod === "qr") {
-    return (
-      <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white flex flex-col">
-        {/* Header */}
-        <div className="relative z-20 px-6 pt-6 pb-4 bg-gradient-to-b from-white to-transparent">
-          <div className="flex items-center justify-between">
-            <button
-              onClick={handleCancel}
-              className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center"
-            >
-              <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-            <div className="w-10"></div>
-            <div className="w-10"></div>
-          </div>
-        </div>
+  // --- PIN & QR Helpers ---
+  const generatePin = () => {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+  };
 
-        {/* Scanner */}
-        <div className="flex-1 flex flex-col items-center justify-center px-6 relative">
-          <div className="w-full max-w-sm aspect-square relative rounded-3xl overflow-hidden bg-gray-100 border-2 border-gray-200">
-            <div id="qr-scanner" ref={qrCodeRef} className="w-full h-full">
-              <video className="w-full h-full object-cover"></video>
-            </div>
+  const generateQrData = (parcelId: string, pin: string) => {
+    return `UNIDROP:${parcelId}:${pin}`;
+  };
 
             {qrResult && (
               <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-purple-50 to-purple-100 z-20">
@@ -308,104 +311,44 @@ export default function UniDropAuth() {
             )}
           </div>
 
-          <div className="text-center mt-8 relative z-20">
-            <div className="w-16 h-16 bg-gradient-to-br from-purple-500 to-purple-600 rounded-3xl flex items-center justify-center shadow-xl shadow-purple-500/30 mx-auto mb-4">
-              <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <h1 className="text-xl font-bold text-slate-900 mb-2">
-              Uni<span className="text-purple-600">Drop</span>
-            </h1>
-            <p className="text-gray-500 text-sm">
-              {qrResult ? "Authentication successful" : "Position QR code within frame"}
-            </p>
-          </div>
-        </div>
+    const pin = generatePin();
+    const qrData = generateQrData(parcelRef.id, pin);
 
-        {/* Footer */}
-        <div className="px-6 pb-8 relative z-20 bg-gradient-to-t from-white to-transparent pt-4">
-          <div className="flex items-center justify-center gap-2 text-gray-400 text-xs">
-            <div className="w-1.5 h-1.5 bg-purple-400 rounded-full"></div>
-            <span>SECURED BY UNIDROP</span>
-          </div>
-        </div>
-      </div>
-    );
-  }
+    const parcelData: Parcel = {
+      id: parcelRef.id,
+      trackingNumber,
+      status: "TO COLLECT",
+      timestamp: Date.now(),
+      date: new Date().toLocaleString(),
+      userName,
+      pin,
+      qrData,
+    };
 
-  // --- PIN Entry Screen ---
-  if (selectedMethod === "pin") {
-    return (
-      <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 flex flex-col">
-        {/* Header */}
-        <div className="safe-area-top px-6 pt-6 pb-4">
-          <div className="flex items-center justify-between">
-            <button
-              onClick={handleBack}
-              className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center"
-            >
-              <svg className="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-            </button>
-            <div className="w-10"></div>
-            <div className="w-10"></div>
-          </div>
-        </div>
+    await setDoc(parcelRef, parcelData);
+    return parcelData;
+  };
 
-        {/* Content */}
-        <div className="flex-1 flex flex-col justify-between px-6 py-8">
-          <div className="flex-1 flex flex-col justify-center">
-            <div className="text-center mb-12">
-              <h1 className="text-3xl font-bold text-slate-900 mb-2">
-                Uni<span className="text-purple-600">Drop</span>
-              </h1>
-              <p className="text-slate-400 text-xs tracking-widest uppercase">
-                Enter Your PIN
-              </p>
-            </div>
+  const loadParcels = async () => {
+    try {
+      const snapshot = await getDocs(collection(db, "parcels"));
+      const list: Parcel[] = snapshot.docs.map((d) => d.data() as Parcel);
+      setParcels(list.sort((a, b) => b.timestamp - a.timestamp));
+    } catch {
+      console.warn("Failed to load parcels");
+    }
+  };
 
-            <div className="flex justify-center gap-4 mb-16">
-              {[0, 1, 2, 3].map((index) => (
-                <div
-                  key={index}
-                  className={`w-3 h-3 rounded-full transition-all duration-200 ${
-                    index < pin.length
-                      ? "bg-purple-600 scale-110 shadow-lg shadow-purple-500/50"
-                      : "bg-slate-200"
-                  }`}
-                />
-              ))}
-            </div>
+  const deleteParcel = async (id: string) => {
+    await deleteDoc(doc(db, "parcels", id));
+    showNotification("Parcel deleted", "success");
+    loadParcels();
+  };
 
-            <div className="max-w-sm mx-auto w-full">
-              <div className="grid grid-cols-3 gap-3 mb-6">
-                {[1,2,3,4,5,6,7,8,9].map((num) => (
-                  <button
-                    key={num}
-                    onClick={() => handleNumberClick(num.toString())}
-                    className="aspect-square rounded-2xl bg-white shadow-sm hover:shadow-md active:scale-95 text-2xl font-semibold text-slate-900 transition-all border border-slate-200"
-                  >
-                    {num}
-                  </button>
-                ))}
-                <div></div>
-                <button
-                  onClick={() => handleNumberClick("0")}
-                  className="aspect-square rounded-2xl bg-white shadow-sm hover:shadow-md active:scale-95 text-2xl font-semibold text-slate-900 transition-all border border-slate-200"
-                >
-                  0
-                </button>
-                <button
-                  onClick={handleBackspace}
-                  className="aspect-square rounded-2xl bg-white shadow-sm hover:shadow-md active:scale-95 flex items-center justify-center transition-all border border-slate-200"
-                >
-                  ⌫
-                </button>
-              </div>
-            </div>
-          </div>
+  // --- OCR Scanning ---
+  const captureAndScan = async () => {
+    if (!videoRef.current || !canvasRef.current || !workerRef.current || isProcessing) return;
+    setIsProcessing(true);
 
           {verificationError && (
             <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-xl">
@@ -464,63 +407,52 @@ export default function UniDropAuth() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
           </div>
-          <h1 className="text-4xl font-bold text-slate-900 mb-2">
-            Uni<span className="text-purple-600">Drop</span>
-          </h1>
-          <p className="text-gray-400 text-xs tracking-widest uppercase">
-            Secure Identity Node
-          </p>
-        </div>
+        )}
 
-        <div className="space-y-4 max-w-md mx-auto w-full">
-          <p className="text-gray-400 text-xs tracking-widest uppercase text-center mb-6">
-            Select Entry Method
-          </p>
-
-          <button
-            onClick={() => setSelectedMethod("qr")}
-            className="w-full bg-white rounded-3xl p-8 shadow-lg hover:shadow-xl transition-all duration-300 active:scale-98 border border-gray-100"
-          >
-            <div className="flex flex-col items-center">
-              <div className="w-16 h-16 bg-purple-100 rounded-2xl flex items-center justify-center mb-4">
-                <svg className="w-8 h-8 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
-                </svg>
-              </div>
-              <h3 className="text-lg font-bold text-slate-900 mb-1">
-                Scan QR Code
-              </h3>
-              <p className="text-gray-400 text-sm">
-                Use your Digital ID
-              </p>
+        <div className="relative bg-black rounded-lg overflow-hidden">
+          <video ref={videoRef} autoPlay playsInline muted className="w-full aspect-video object-cover" />
+          <canvas ref={canvasRef} className="hidden" />
+          {isProcessing && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-white px-3 py-1 rounded flex items-center gap-2 shadow">
+              <Loader className="animate-spin" />
+              <span>Scanning for UD#####...</span>
             </div>
-          </button>
-
-          <button
-            onClick={() => setSelectedMethod("pin")}
-            className="w-full bg-white rounded-3xl p-8 shadow-lg hover:shadow-xl transition-all duration-300 active:scale-98 border border-gray-100"
-          >
-            <div className="flex flex-col items-center">
-              <div className="w-16 h-16 bg-purple-100 rounded-2xl flex items-center justify-center mb-4">
-                <svg className="w-8 h-8 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14" />
-                </svg>
-              </div>
-              <h3 className="text-lg font-bold text-slate-900 mb-1">
-                Enter PIN
-              </h3>
-              <p className="text-gray-400 text-sm">
-                Manual Passcode
-              </p>
+          )}
+          {scannedText && (
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-green-600 text-white px-4 py-2 rounded-lg text-lg font-bold shadow">
+              {scannedText}
             </div>
-          </button>
-        </div>
-
-        <div className="text-center pt-12">
-          <div className="inline-flex items-center gap-2 text-gray-400 text-xs tracking-wider uppercase">
-            <div className="w-1.5 h-1.5 bg-purple-400 rounded-full"></div>
-            <span>UniDrop Cloud Verified</span>
+          )}
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="border-4 border-green-400 rounded-xl w-1/2 h-1/3 opacity-70"></div>
           </div>
+        </div>
+
+        <div className="bg-white p-4 rounded-lg shadow max-h-80 overflow-y-auto">
+          <h2 className="font-bold mb-2 flex items-center gap-2">
+            <Database /> Scanned Parcels ({parcels.length})
+          </h2>
+          {parcels.length === 0 ? (
+            <p className="text-gray-600">No parcels scanned yet</p>
+          ) : (
+            parcels.map((p) => (
+              <div key={p.id} className="border-b py-3 space-y-2">
+                <p className="font-bold text-green-700">{p.trackingNumber}</p>
+                <p className="text-sm text-gray-600">{p.date}</p>
+                {p.userName && <p className="text-sm text-blue-700">User: {p.userName}</p>}
+
+                {/* Display PIN */}
+                <p className="text-sm font-mono">PIN: {p.pin}</p>
+
+                {/* Display QR code */}
+                <QRCodeSVG value={p.qrData} size={100} />
+
+                <button onClick={() => deleteParcel(p.id)}>
+                  <Trash2 className="text-red-600 hover:text-red-800" />
+                </button>
+              </div>
+            ))
+          )}
         </div>
       </div>
     </div>
